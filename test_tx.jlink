@@ -1,0 +1,8 @@
+device STM32F103RC
+si swd
+speed 4000
+h
+w4 0x40004404 0x41
+w4 0x40004404 0x42
+w4 0x40004404 0x43
+exit

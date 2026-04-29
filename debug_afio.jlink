@@ -1,0 +1,6 @@
+device STM32F103RC
+si swd
+speed 4000
+h
+mem32 0x40010004 1
+exit

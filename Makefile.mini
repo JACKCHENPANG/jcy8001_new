@@ -1,0 +1,58 @@
+# JCY8001 最小固件 Makefile
+# 纯寄存器操作，零外部依赖
+
+TOOLCHAIN = /Users/jcy/toolchains/bin
+CC = $(TOOLCHAIN)/arm-none-eabi-gcc
+AS = $(TOOLCHAIN)/arm-none-eabi-gcc
+OBJCOPY = $(TOOLCHAIN)/arm-none-eabi-objcopy
+SIZE = $(TOOLCHAIN)/arm-none-eabi-size
+
+PROJECT = /Users/jcy/Projects/JCY8001_new
+BUILD = $(PROJECT)/build
+DEVICE = STM32F103RC
+
+# CPU & 编译选项
+CPU = -mcpu=cortex-m3 -mthumb
+CFLAGS = $(CPU) -Wall -O2 -g -ffunction-sections -fdata-sections
+ASFLAGS = $(CPU)
+LDFLAGS = $(CPU) -T$(PROJECT)/linker.ld -Wl,--gc-sections -Wl,-Map=$(BUILD)/firmware.map
+LDFLAGS += -specs=nosys.specs -specs=nano.specs
+
+# 源文件（只有2个！）
+C_SRCS = $(PROJECT)/main.c
+ASM_SRCS = $(PROJECT)/startup.s
+
+# 目标文件
+OBJS = $(BUILD)/main.o $(BUILD)/startup.o
+
+# 输出
+TARGET = $(BUILD)/firmware
+
+all: $(TARGET).bin $(TARGET).hex
+	$(SIZE) $(TARGET).elf
+
+$(BUILD):
+	mkdir -p $(BUILD)
+
+$(BUILD)/%.o: $(PROJECT)/%.c | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/%.o: $(PROJECT)/%.s | $(BUILD)
+	$(AS) $(ASFLAGS) -c $< -o $@
+
+$(TARGET).elf: $(OBJS) | $(BUILD)
+	$(CC) $(LDFLAGS) $(OBJS) -o $@
+
+$(TARGET).hex: $(TARGET).elf
+	$(OBJCOPY) -O ihex $< $@
+
+$(TARGET).bin: $(TARGET).elf
+	$(OBJCOPY) -O binary $< $@
+
+flash: $(TARGET).hex
+	JLinkExe -device $(DEVICE) -if swd -speed 4000 -CommanderScript $(PROJECT)/flash.jlink
+
+clean:
+	rm -rf $(BUILD)
+
+.PHONY: all clean flash

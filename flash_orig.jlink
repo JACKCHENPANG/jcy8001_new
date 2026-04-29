@@ -1,0 +1,7 @@
+device STM32F103RC
+si swd
+speed 4000
+loadfile /Users/jcy/Projects/JCY8001/firmware/NDB110x_V1.2.hex
+r
+g
+exit

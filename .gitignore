@@ -1,0 +1,9 @@
+build/
+*.o
+*.d
+*.elf
+*.hex
+*.bin
+*.map
+*.lst
+*.十字光标.jlink
