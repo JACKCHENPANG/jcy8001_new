@@ -16,3 +16,13 @@ Drivers/FreeRTOS/
 Drivers/BSP/
 Drivers/CMSIS/
 Drivers/DSP/
+
+# Keil/MDK project files
+*.uvoptx
+*.uvprojx
+*.dep
+RTE/
+Core/
+Modules/
+Utils/
+Listings/
