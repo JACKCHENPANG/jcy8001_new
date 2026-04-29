@@ -56,6 +56,7 @@ typedef struct {
 #define RCC_APB2ENR_AFIOEN    (1UL << 0)
 #define RCC_APB2ENR_IOPAEN    (1UL << 2)
 #define RCC_APB2ENR_IOPCEN    (1UL << 4)
+#define RCC_APB2ENR_SPI1EN    (1UL << 12)
 #define RCC_APB1ENR_USART2EN  (1UL << 17)
 
 /* Flash */
@@ -96,6 +97,24 @@ typedef struct {
 
 /* SCB */
 #define SCB_VTOR            (*((volatile uint32_t *)0xE000ED08UL))
+
+/* SPI1 (APB2, PA5=SCK, PA6=MISO, PA7=MOSI) */
+#define SPI1_BASE        (APB2PERIPH_BASE + 0x3000UL)
+#define SPI1             ((SPI_TypeDef *)SPI1_BASE)
+
+typedef struct {
+    volatile uint32_t CR1, CR2, SR, DR, CRCPR, RXCRCR, TXCRCR;
+} SPI_TypeDef;
+
+#define SPI_CR1_SPE     (1UL << 6)
+#define SPI_CR1_MSTR    (1UL << 2)
+#define SPI_CR1_CPOL    (1UL << 1)
+#define SPI_CR1_CPHA    (1UL << 0)
+#define SPI_CR1_BR_POS  3
+#define SPI_CR1_BR_DIV2 (0UL << 3)
+
+#define SPI_SR_RXNE     (1UL << 0)
+#define SPI_SR_TXE      (1UL << 1)
 
 /* SysTick - 注意地址顺序: CTRL=0x10, LOAD=0x14, VAL=0x18 */
 #define SysTick_CTRL        (*((volatile uint32_t *)0xE000E010UL))
@@ -462,6 +481,210 @@ static void led_toggle(void) { GPIOC->ODR ^= (1UL << 13); }
 static void led_on(void)     { GPIOC->BRR = (1UL << 13); }
 static void led_off(void)    { GPIOC->BSRR = (1UL << 13); }
 
+/* ============================================================
+ * SPI1 初始化 (PA5=SCK, PA6=MISO, PA7=MOSI)
+ * ============================================================ */
+static void spi1_init(void)
+{
+    /* 使能 GPIOA + SPI1 时钟 */
+    RCC->APB2ENR |= RCC_APB2ENR_IOPAEN | RCC_APB2ENR_SPI1EN;
+
+    /* PA5(SCK), PA7(MOSI): 复用推挽输出 10MHz (CNF=10, MODE=01)
+     * PA6(MISO): 浮空输入 (CNF=01, MODE=00) */
+    uint32_t crl = GPIOA->CRL;
+    crl &= ~((0xFUL << 20) | (0xFUL << 24));  /* 清除 Pin5, Pin6 */
+    crl |= (0xAUL << 20);   /* PA5: AF PP 10MHz (CNF=10, MODE=01) */
+    crl |= (0x4UL << 24);   /* PA6: Input floating (CNF=01, MODE=00) */
+    crl &= ~(0xFUL << 28);  /* 清除 Pin7 */
+    crl |= (0xAUL << 28);   /* PA7: AF PP 10MHz (CNF=10, MODE=01) */
+    GPIOA->CRL = crl;
+
+    /* SPI1: 主机模式, 8位, MSB优先, CPOL=0 CPHA=0, 分频2 (APB2=64MHz/2=32MHz) */
+    SPI1->CR1 = SPI_CR1_MSTR | SPI_CR1_CPOL | SPI_CR1_CPHA;  /* MSTR+CPOL+CPHA first */
+    SPI1->CR1 &= ~(0x7UL << SPI_CR1_BR_POS);                  /* 清除分频位 */
+    SPI1->CR1 |= SPI_CR1_BR_DIV2;                             /* 2分频 = 16MHz SPI clock */
+    SPI1->CR2 = 0;
+    SPI1->CR1 |= SPI_CR1_SPE;                                 /* 使能SPI1 */
+}
+
+/* SPI1 轮询传输一个字节 */
+static uint8_t spi1_transfer(uint8_t data)
+{
+    /* 等待TXE */
+    while (!(SPI1->SR & SPI_SR_TXE));
+    SPI1->DR = data;
+    /* 等待RXNE */
+    while (!(SPI1->SR & SPI_SR_RXNE));
+    return (uint8_t)(SPI1->DR & 0xFF);
+}
+
+/* ============================================================
+ * DNB1101 简化协议 (零依赖版)
+ * DNB11xx_CreateSendBuf: 构建发送缓冲
+ *   p[0..3] = 命令参数 (小端)
+ *   ICs = 芯片数量
+ *   HeadLen = 帧长度
+ * ============================================================ */
+#define DNB11XX_BUF_SIZE  64
+
+static uint8_t dnb_send_buf[DNB11XX_BUF_SIZE];
+static uint8_t dnb_recv_buf[DNB11XX_BUF_SIZE];
+
+static uint32_t dnb_create_send_buf(const uint8_t *p, uint8_t ICs, uint32_t head_len)
+{
+    uint32_t i, j;
+    for (i = 0; i < head_len - 1; i++) {
+        dnb_send_buf[i] = 0;
+    }
+    dnb_send_buf[i++] = 0x0f;
+    dnb_send_buf[i++] = p[3];
+    dnb_send_buf[i++] = p[2];
+    dnb_send_buf[i++] = p[1];
+    dnb_send_buf[i++] = p[0];
+    j = i;
+    for (; (i - j) < (ICs * 4); i++) {
+        dnb_send_buf[i] = 0xff;
+    }
+    dnb_send_buf[i++] = 0xf0;
+    return i; /* 返回总长度 */
+}
+
+/* DNB11xx SPI 全双工传输 */
+static void dnb_spi_transfer(uint8_t *tx, uint8_t *rx, uint32_t len)
+{
+    uint32_t i;
+    for (i = 0; i < len; i++) {
+        rx[i] = spi1_transfer(tx[i]);
+    }
+}
+
+/* 构建 GetData 命令 (简化版, 无CRC4校验) */
+static void dnb_build_getdata_cmd(uint8_t id, uint8_t data_type, uint8_t *cmd_out)
+{
+    /* 8字节命令结构:
+     * [0] = CMD_Type_GetData (0x0D)
+     * [1] = DataType_L | DataType_H
+     * [2] = 选项
+     * [3] = ID
+     * [4] = CRC4 (暂用0)
+     * [5..6] = 0xFF (padding)
+     * [7] = 0xF0 (end marker) */
+    cmd_out[0] = 0x0D;           /* CMD_GetData */
+    cmd_out[1] = data_type;      /* DataType */
+    cmd_out[2] = 0x00;           /* 选项: ClrExeCnt=0, Equidist=0, ResetRSC=0 */
+    cmd_out[3] = id;             /* IC ID */
+    cmd_out[4] = 0x00;           /* CRC4 (简化版=0) */
+    cmd_out[5] = 0xFF;
+    cmd_out[6] = 0xFF;
+    cmd_out[7] = 0xF0;
+}
+
+/* 读取指定类型数据 */
+static int dnb_read_data(uint8_t ic_id, uint8_t data_type, int16_t *mantissa, int16_t *exponent)
+{
+    uint8_t cmd[8];
+    uint8_t resp[8];
+    dnb_build_getdata_cmd(ic_id, data_type, cmd);
+    dnb_spi_transfer(cmd, resp, 8);
+
+    /* 响应格式: [0]=响应状态, [1..2]=Mantissa, [3..4]=Exponent, [7]=0xF0 */
+    if (resp[7] == 0xF0) {
+        *mantissa = (int16_t)((resp[2] << 8) | resp[1]);
+        *exponent = (int16_t)((resp[4] << 8) | resp[3]);
+        return 0;
+    }
+    return -1;
+}
+
+/* DNB1101 数据容器 (周期读取更新) */
+static struct {
+    int16_t zreal_mant;
+    int16_t zreal_exp;
+    int16_t zimag_mant;
+    int16_t zimag_exp;
+    int16_t voltage;     /* mV */
+    int16_t temperature; /* 0.1°C */
+    uint8_t valid;
+} dnb_data;
+
+/* 定期轮询 DNB1101 (每500ms一次) */
+static void dnb_poll(void)
+{
+    static uint32_t last_poll = 0;
+    uint32_t now = systick_ms;
+
+    if ((now - last_poll) < 500) return;
+    last_poll = now;
+
+    /* 发送两次命令 (原固件行为: 发两次隔2ms) */
+    int16_t m, e;
+
+    /* 电压 (DataType=0x06 -> 对应MainVolt) */
+    if (dnb_read_data(0xFF, 0x06, &m, &e) == 0) {
+        /* 电压 = m/16383*4800+1200 mV */
+        dnb_data.voltage = (int16_t)((m * 4800) / 16383 + 1200);
+    }
+
+    /* 温度 (DataType=0x07 -> 对应MainDieTemp) */
+    if (dnb_read_data(0xFF, 0x07, &m, &e) == 0) {
+        dnb_data.temperature = (int16_t)(m * 10 / 16); /* 0.1°C */
+    }
+
+    /* ZREAL (DataType=0x09) */
+    if (dnb_read_data(0xFF, 0x09, &m, &e) == 0) {
+        dnb_data.zreal_mant = m;
+        dnb_data.zreal_exp = e;
+    }
+
+    /* ZIMAG (DataType=0x0A) */
+    if (dnb_read_data(0xFF, 0x0A, &m, &e) == 0) {
+        dnb_data.zimag_mant = m;
+        dnb_data.zimag_exp = e;
+    }
+
+    dnb_data.valid = 1;
+}
+
+/* 更新 Modbus 寄存器 (用真实数据替换模拟值) */
+static void dnb_update_modbus_regs(void)
+{
+    if (!dnb_data.valid) return;
+
+    /* 0x3340: 电压 (mV) */
+    modbus_regs_input[0x40] = (uint16_t)(dnb_data.voltage & 0xFFFF);
+
+    /* 0x3300: 温度 (0.1°C) */
+    modbus_regs_input[0x00] = (uint16_t)(dnb_data.temperature & 0xFFFF);
+
+    /* 0x3100: ZREAL (mΩ) - 公式: mant * 10^(exp-10) */
+    {
+        int32_t zreal = dnb_data.zreal_mant;
+        int16_t exp = dnb_data.zreal_exp;
+        if (exp >= 10) {
+            int i;
+            for (i = 0; i < (exp - 10); i++) zreal *= 10;
+        } else {
+            int i;
+            for (i = 0; i < (10 - exp); i++) zreal /= 10;
+        }
+        modbus_regs_input[0x00] = (uint16_t)(zreal & 0xFFFF);
+    }
+
+    /* 0x3140: ZIMAG (mΩ) */
+    {
+        int32_t zimag = dnb_data.zimag_mant;
+        int16_t exp = dnb_data.zimag_exp;
+        if (exp >= 10) {
+            int i;
+            for (i = 0; i < (exp - 10); i++) zimag *= 10;
+        } else {
+            int i;
+            for (i = 0; i < (10 - exp); i++) zimag /= 10;
+        }
+        modbus_regs_input[0x40] = (uint16_t)(zimag & 0xFFFF);
+    }
+}
+
 static void systick_init(void)
 {
     SysTick_LOAD = 64000UL - 1;
@@ -485,6 +708,7 @@ int main(void)
 {
     led_init();
     usart2_init();
+    spi1_init();
     systick_init();
     modbus_init_regs();
     
@@ -505,6 +729,9 @@ int main(void)
             modbus_rx_done = 0;
         }
         
+        dnb_poll();
+        dnb_update_modbus_regs();
+
         if (systick_ms - heartbeat >= 500) {
             heartbeat = systick_ms;
             led_toggle();
