@@ -6,4 +6,13 @@ build/
 *.bin
 *.map
 *.lst
-*.十字光标.jlink
+十字光标.jlink
+
+# Third-party drivers (copy as needed)
+Drivers/CMSIS/
+Drivers/STM32F10x_StdPeriph_Driver/
+Drivers/STM32F1xx_HAL_Driver/
+Drivers/FreeRTOS/
+Drivers/BSP/
+Drivers/CMSIS/
+Drivers/DSP/
